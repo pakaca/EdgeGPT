@@ -104,9 +104,11 @@ class Conversation:
                 with open(token_path, "r", encoding="utf-8") as file:
                     token = file.read()
             else:
+                print("Getting token hopefully")
                 # POST request to get token
                 url = "https://images.duti.tech/allow"
                 response = requests.post(url, timeout=10)
+                print("Got some response")
                 if response.status_code != 200:
                     raise Exception("Authentication failed")
                 token = response.json()["token"]
