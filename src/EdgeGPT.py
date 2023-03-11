@@ -1,16 +1,68 @@
 """
 Main.py
 """
+from __future__ import annotations
 import argparse
 import asyncio
 import json
 import os
+import random
 import sys
+import uuid
+from enum import Enum
+from typing import Generator
+from typing import Literal
+from typing import Optional
+from typing import Union
 
 import requests
 import websockets.client as websockets
 
 DELIMITER = "\x1e"
+
+
+# Generate random IP between range 13.104.0.0/14
+FORWARDED_IP = (
+    f"13.{random.randint(104, 107)}.{random.randint(0, 255)}.{random.randint(0, 255)}"
+)
+
+HEADERS = {
+    "accept": "application/json",
+    "accept-language": "en-US,en;q=0.9",
+    "content-type": "application/json",
+    "sec-ch-ua": '"Not_A Brand";v="99", "Microsoft Edge";v="109", "Chromium";v="109"',
+    "sec-ch-ua-arch": '"x86"',
+    "sec-ch-ua-bitness": '"64"',
+    "sec-ch-ua-full-version": '"109.0.1518.78"',
+    "sec-ch-ua-full-version-list": '"Not_A Brand";v="99.0.0.0", "Microsoft Edge";v="109.0.1518.78", "Chromium";v="109.0.5414.120"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-model": "",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-ch-ua-platform-version": '"15.0.0"',
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-origin",
+    "x-ms-client-request-id": str(uuid.uuid4()),
+    "x-ms-useragent": "azsdk-js-api-client-factory/1.0.0-beta.1 core-rest-pipeline/1.10.0 OS/Win32",
+    "Referer": "https://www.bing.com/search?q=Bing+AI&showconv=1&FORM=hpcodx",
+    "Referrer-Policy": "origin-when-cross-origin",
+    "x-forwarded-for": FORWARDED_IP,
+}
+
+
+class NotAllowedToAccess(Exception):
+    pass
+
+
+class ConversationStyle(Enum):
+    creative = "h3imaginative"
+    balanced = "harmonyv3"
+    precise = "h3precise"
+
+
+CONVERSATION_STYLE_TYPE = Optional[
+    Union[ConversationStyle, Literal["creative", "balanced", "precise"]]
+]
 
 
 def append_identifier(msg: dict) -> str:
@@ -33,7 +85,7 @@ class ChatHubRequest:
         conversation_id: str,
         invocation_id: int = 0,
     ) -> None:
-        self.struct: dict
+        self.struct: dict = {}
 
         self.client_id: str = client_id
         self.conversation_id: str = conversation_id
@@ -43,22 +95,34 @@ class ChatHubRequest:
     def update(
         self,
         prompt: str,
+        conversation_style: CONVERSATION_STYLE_TYPE,
+        options: Optional[list] = None,
     ) -> None:
         """
         Updates request object
         """
+        if options is None:
+            options = [
+                "deepleo",
+                "enable_debug_commands",
+                "disable_emoji_spoken_text",
+                "enablemm",
+            ]
+        if conversation_style:
+            if not isinstance(conversation_style, ConversationStyle):
+                conversation_style = getattr(ConversationStyle, conversation_style)
+            options = [
+                "deepleo",
+                "enable_debug_commands",
+                "disable_emoji_spoken_text",
+                "enablemm",
+                conversation_style.value,
+            ]
         self.struct = {
             "arguments": [
                 {
                     "source": "cib",
-                    "optionsSets": [
-                        "nlu_direct_response_filter",
-                        "deepleo",
-                        "enable_debug_commands",
-                        "disable_emoji_spoken_text",
-                        "responsible_ai_policy_235",
-                        "enablemm",
-                    ],
+                    "optionsSets": options,
                     "isStartOfSession": self.invocation_id == 0,
                     "message": {
                         "author": "user",
@@ -85,65 +149,47 @@ class Conversation:
     Conversation API
     """
 
-    def __init__(self) -> None:
+    def __init__(self, cookiePath: str = "", cookies: Optional[dict] = None) -> None:
         self.struct: dict = {
             "conversationId": None,
             "clientId": None,
             "conversationSignature": None,
             "result": {"value": "Success", "message": None},
         }
-        # Create cookies
-        if os.environ.get("BING_U") is None:
-            home = os.path.expanduser("~")
-            # Check if token exists
-            token_path = f"{home}/.config/bing_token"
-            # Make .config directory if it doesn't exist
-            if not os.path.exists(f"{home}/.config"):
-                os.mkdir(f"{home}/.config")
-            if os.path.exists(token_path):
-                with open(token_path, "r", encoding="utf-8") as file:
-                    token = file.read()
-            else:
-                print("Getting token hopefully")
-                # POST request to get token
-                url = "https://images.duti.tech/allow"
-                response = requests.post(url, timeout=10)
-                print("Got some response")
-                if response.status_code != 200:
-                    raise Exception("Authentication failed")
-                token = response.json()["token"]
-                # Save token
-                with open(token_path, "w", encoding="utf-8") as file:
-                    file.write(token)
-            headers = {
-                "Authorization": token,
-            }
-            url = "https://images.duti.tech/auth"
-            # Send GET request
-            response = requests.get(
-                url,
-                headers=headers,
-                timeout=10,
-            )
-            if response.status_code != 200:
-                raise Exception("Authentication failed")
-
+        self.session = requests.Session()
+        self.session.headers.update(
+            {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36",
+            },
+        )
+        if cookies is not None:
+            cookie_file = cookies
         else:
-            cookies = {
-                "_U": os.environ.get("BING_U"),
-            }
-            url = "https://www.bing.com/turing/conversation/create"
-            # Send GET request
-            response = requests.get(
-                url,
-                cookies=cookies,
-                timeout=30,
+            f = (
+                open(cookiePath, encoding="utf8").read()
+                if cookiePath
+                else open(os.environ.get("COOKIE_FILE"), encoding="utf-8").read()
             )
-            if response.status_code != 200:
-                raise Exception("Authentication failed")
+            cookie_file = json.loads(f)
+        for cookie in cookie_file:
+            self.session.cookies.set(cookie["name"], cookie["value"])
+        url = "https://edgeservices.bing.com/edgesvc/turing/conversation/create"
+        # Send GET request
+        response = self.session.get(
+            url,
+            timeout=30,
+            headers=HEADERS,
+            allow_redirects=True,
+        )
+        if response.status_code != 200:
+            print(f"Status code: {response.status_code}")
+            print(response.text)
+            raise Exception("Authentication failed")
         try:
             self.struct = response.json()
-        except json.decoder.JSONDecodeError as exc:
+            if self.struct["result"]["value"] == "UnauthorizedRequest":
+                raise NotAllowedToAccess(self.struct["result"]["message"])
+        except (json.decoder.JSONDecodeError, NotAllowedToAccess) as exc:
             raise Exception(
                 "Authentication failed. You have not been accepted into the beta.",
             ) from exc
@@ -155,7 +201,7 @@ class ChatHub:
     """
 
     def __init__(self, conversation: Conversation) -> None:
-        self.wss: websockets.WebSocketClientProtocol = None
+        self.wss: Optional[websockets.WebSocketClientProtocol] = None
         self.request: ChatHubRequest
         self.loop: bool
         self.task: asyncio.Task
@@ -165,22 +211,24 @@ class ChatHub:
             conversation_id=conversation.struct["conversationId"],
         )
 
-    async def ask_stream(self, prompt: str) -> str:
+    async def ask_stream(
+        self,
+        prompt: str,
+        conversation_style: CONVERSATION_STYLE_TYPE = None,
+    ) -> Generator[str, None, None]:
         """
         Ask a question to the bot
         """
         # Check if websocket is closed
-        if self.wss:
-            if self.wss.closed:
-                self.wss = await websockets.connect(
-                    "wss://sydney.bing.com/sydney/ChatHub",
-                )
-                await self.__initial_handshake()
-        else:
-            self.wss = await websockets.connect("wss://sydney.bing.com/sydney/ChatHub")
+        if self.wss and self.wss.closed or not self.wss:
+            self.wss = await websockets.connect(
+                "wss://sydney.bing.com/sydney/ChatHub",
+                extra_headers=HEADERS,
+                max_size=None,
+            )
             await self.__initial_handshake()
         # Construct a ChatHub request
-        self.request.update(prompt=prompt)
+        self.request.update(prompt=prompt, conversation_style=conversation_style)
         # Send request
         await self.wss.send(append_identifier(self.request.struct))
         final = False
@@ -206,9 +254,8 @@ class ChatHub:
         """
         Close the connection
         """
-        if self.wss:
-            if not self.wss.closed:
-                await self.wss.close()
+        if self.wss and not self.wss.closed:
+            await self.wss.close()
 
 
 class Chatbot:
@@ -216,22 +263,39 @@ class Chatbot:
     Combines everything to make it seamless
     """
 
-    def __init__(self) -> None:
-        self.chat_hub: ChatHub = ChatHub(Conversation())
+    def __init__(self, cookiePath: str = "", cookies: Optional[dict] = None) -> None:
+        self.cookiePath: str = cookiePath
+        self.cookies: Optional[dict] = cookies
+        self.chat_hub: ChatHub = ChatHub(Conversation(self.cookiePath, self.cookies))
 
-    async def ask(self, prompt: str) -> dict:
+    async def ask(
+        self,
+        prompt: str,
+        conversation_style: CONVERSATION_STYLE_TYPE = None,
+    ) -> dict:
         """
         Ask a question to the bot
         """
-        async for final, response in self.chat_hub.ask_stream(prompt=prompt):
+        async for final, response in self.chat_hub.ask_stream(
+            prompt=prompt,
+            conversation_style=conversation_style,
+        ):
             if final:
                 return response
+        self.chat_hub.wss.close()
 
-    async def ask_stream(self, prompt: str) -> str:
+    async def ask_stream(
+        self,
+        prompt: str,
+        conversation_style: CONVERSATION_STYLE_TYPE = None,
+    ) -> Generator[str, None, None]:
         """
         Ask a question to the bot
         """
-        async for response in self.chat_hub.ask_stream(prompt=prompt):
+        async for response in self.chat_hub.ask_stream(
+            prompt=prompt,
+            conversation_style=conversation_style,
+        ):
             yield response
 
     async def close(self):
@@ -245,7 +309,7 @@ class Chatbot:
         Reset the conversation
         """
         await self.close()
-        self.chat_hub = ChatHub(Conversation())
+        self.chat_hub = ChatHub(Conversation(self.cookiePath, self.cookies))
 
 
 def get_input(prompt):
@@ -254,6 +318,11 @@ def get_input(prompt):
     """
     # Display the prompt
     print(prompt, end="")
+
+    if args.enter_once:
+        user_input = input()
+        print()
+        return user_input
 
     # Initialize an empty list to store the input lines
     lines = []
@@ -297,13 +366,16 @@ async def main():
         print("Bot:")
         if args.no_stream:
             print(
-                (await bot.ask(prompt=prompt))["item"]["messages"][1]["adaptiveCards"][
-                    0
-                ]["body"][0]["text"],
+                (await bot.ask(prompt=prompt, conversation_style=args.style))["item"][
+                    "messages"
+                ][1]["adaptiveCards"][0]["body"][0]["text"],
             )
         else:
             wrote = 0
-            async for final, response in bot.ask_stream(prompt=prompt):
+            async for final, response in bot.ask_stream(
+                prompt=prompt,
+                conversation_style=args.style,
+            ):
                 if not final:
                     print(response[wrote:], end="")
                     wrote = len(response)
@@ -323,13 +395,24 @@ if __name__ == "__main__":
         !help for help
 
         Type !exit to exit
-        Enter twice to send message
+        Enter twice to send message or set --enter-once to send one line message
     """,
     )
     parser = argparse.ArgumentParser()
+    parser.add_argument("--enter-once", action="store_true")
     parser.add_argument("--no-stream", action="store_true")
-    parser.add_argument("--bing-cookie", type=str, default="")
+    parser.add_argument(
+        "--style",
+        choices=["creative", "balanced", "precise"],
+        default="balanced",
+    )
+    parser.add_argument(
+        "--cookie-file",
+        type=str,
+        default="cookies.json",
+        required=True,
+    )
     args = parser.parse_args()
-    if args.bing_cookie:
-        os.environ["BING_U"] = args.bing_cookie
+    os.environ["COOKIE_FILE"] = args.cookie_file
+    args = parser.parse_args()
     asyncio.run(main())
